@@ -74,19 +74,26 @@ def make_pds_certificate(skill_id: str = "cert-pds-001"):
 def build_populated_library():
     """
     Build a library with 3 skills for query tests:
-      - skill-1: CDS, universally beneficial
-      - skill-2: PDS, trade-off within ε
-      - skill-3: CDS, another universally beneficial
+      - cert-cds-001: CDS, universally beneficial
+      - cert-pds-001: PDS, trade-off within ε
+      - cert-cds-002: CDS, another universally beneficial
     """
     lib = SkillLibrary()
-    lib.add_skill("skill-1", make_cds_certificate("cert-cds-001"), make_dummy_policy(0))
-    lib.add_skill("skill-2", make_pds_certificate("cert-pds-001"), make_dummy_policy(1))
-    lib.add_skill("skill-3", make_cds_certificate("cert-cds-002"), make_dummy_policy(2))
+    
+    cert1 = make_cds_certificate("cert-cds-001")
+    lib.add_skill(cert1.skill_id, cert1, make_dummy_policy(0))
+    
+    cert2 = make_pds_certificate("cert-pds-001")
+    lib.add_skill(cert2.skill_id, cert2, make_dummy_policy(1))
+    
+    cert3 = make_cds_certificate("cert-cds-002")
+    lib.add_skill(cert3.skill_id, cert3, make_dummy_policy(2))
+    
     return lib
 
 def test_skill_entry_creation():
     """SkillEntry should store all fields correctly."""
-    cert = make_cds_certificate()
+    cert = make_cds_certificate("skill-1")
     entry = SkillEntry(
         skill_id="skill-1",
         gate_type="CDS",
@@ -190,8 +197,8 @@ def test_certificate_to_dict_roundtrip():
 def test_add_certified_skill_succeeds():
     """Adding a skill with a valid certificate should succeed."""
     lib = SkillLibrary()
-    cert = make_cds_certificate()
-    result = lib.add_skill("skill-1", cert, make_dummy_policy())
+    cert = make_cds_certificate("skill-1")
+    result = lib.add_skill(cert.skill_id, cert, make_dummy_policy())
 
     assert result is True
     assert lib.count() == 1
@@ -206,11 +213,11 @@ def test_add_multiple_skills():
 def test_add_overwrites_existing_skill():
     """Adding a skill with an existing ID should overwrite it."""
     lib = SkillLibrary()
-    cert1 = make_cds_certificate("cert-001")
-    cert2 = make_pds_certificate("cert-002")
+    cert1 = make_cds_certificate("skill-1")
+    cert2 = make_pds_certificate("skill-1")
 
-    lib.add_skill("skill-1", cert1, make_dummy_policy(0))
-    lib.add_skill("skill-1", cert2, make_dummy_policy(1))
+    lib.add_skill(cert1.skill_id, cert1, make_dummy_policy(0))
+    lib.add_skill(cert2.skill_id, cert2, make_dummy_policy(1))
 
     assert lib.count() == 1
     # Should have the second certificate's data
@@ -233,21 +240,21 @@ def test_add_noncertified_skill_rejected():
 
     # Known certificate → accepted
     known_cert = make_cds_certificate(skill_id="cert-known")
-    assert lib.add_skill("good", known_cert, make_dummy_policy()) is True
+    assert lib.add_skill(known_cert.skill_id, known_cert, make_dummy_policy()) is True
 
-    # Unknown certificate → rejected
+    # Unknown certificate (ID mismatch) → rejected
     unknown_cert = make_cds_certificate(skill_id="cert-unknown")
-    assert lib.add_skill("bad", unknown_cert, make_dummy_policy()) is False
-    assert lib.count() == 1  # only the good one
+    assert lib.add_skill("cert-known", unknown_cert, make_dummy_policy()) is False
+    assert lib.count() == 1  # only the first one
 
 
 def test_get_skill_returns_correct_entry():
     """get_skill should return the matching SkillEntry."""
     lib = build_populated_library()
-    entry = lib.get_skill("skill-2")
+    entry = lib.get_skill("cert-pds-001")
 
     assert entry is not None
-    assert entry.skill_id == "skill-2"
+    assert entry.skill_id == "cert-pds-001"
     assert entry.gate_type == "PDS"
 
 
@@ -262,11 +269,11 @@ def test_remove_skill_succeeds():
     lib = build_populated_library()
     assert lib.count() == 3
 
-    result = lib.remove_skill("skill-2")
+    result = lib.remove_skill("cert-pds-001")
 
     assert result is True
     assert lib.count() == 2
-    assert lib.get_skill("skill-2") is None
+    assert lib.get_skill("cert-pds-001") is None
 
 
 def test_remove_nonexistent_skill_returns_false():
@@ -292,13 +299,14 @@ def test_query_by_gate_type_pds():
 
     assert len(pds_skills) == 1
     assert pds_skills[0].gate_type == "PDS"
-    assert pds_skills[0].skill_id == "skill-2"
+    assert pds_skills[0].skill_id == "cert-pds-001"
 
 
 def test_query_by_gate_type_empty_result():
     """query_by_gate_type should return empty list if no match."""
     lib = SkillLibrary()
-    lib.add_skill("s1", make_cds_certificate(), make_dummy_policy())
+    cert = make_cds_certificate("s1")
+    lib.add_skill(cert.skill_id, cert, make_dummy_policy())
 
     assert lib.query_by_gate_type("PDS") == []
 
@@ -306,7 +314,8 @@ def test_query_by_gate_type_empty_result():
 def test_query_by_weights_cds_always_admissible():
     """CDS skills should be admissible under ANY valid weight vector."""
     lib = SkillLibrary()
-    lib.add_skill("cds-skill", make_cds_certificate(), make_dummy_policy())
+    cert = make_cds_certificate("cds-skill")
+    lib.add_skill(cert.skill_id, cert, make_dummy_policy())
 
     # Try multiple weight vectors — CDS should always pass
     for w in [[0.5, 0.5], [1.0, 0.0], [0.0, 1.0], [0.3, 0.7]]:
@@ -318,7 +327,8 @@ def test_query_by_weights_pds_depends_on_weights():
     """PDS skills should only pass for weight vectors where Δr + w^T·Δn ≥ -ε."""
     lib = SkillLibrary()
     # PDS cert: Δr=0.5, Δn=(0.8, -0.6), ε=0.1
-    lib.add_skill("pds-skill", make_pds_certificate(), make_dummy_policy())
+    cert = make_pds_certificate("pds-skill")
+    lib.add_skill(cert.skill_id, cert, make_dummy_policy())
 
     # w=[0.5, 0.5]: score = 0.5 + 0.5*0.8 + 0.5*(-0.6) = 0.5 + 0.1 = 0.6 ≥ -0.1 → Pass
     assert len(lib.query_by_weights([0.5, 0.5])) == 1
@@ -351,7 +361,15 @@ def test_query_by_weights_pds_rejected():
         episode_length=200,
         version="0.1.0",
     )
-    lib.add_skill("hard-pds", bad_cert, make_dummy_policy())
+    # We must bypass add_skill here because our new Chain of Safety correctly 
+    # rejects this mathematically failing certificate before it enters the library!
+    # We inject it directly into _skills to test query_by_weights in isolation.
+    lib._skills["hard-pds"] = SkillEntry(
+        skill_id="hard-pds",
+        gate_type="PDS",
+        certificate=bad_cert,
+        policy=make_dummy_policy()
+    )
 
     # w=[0.0, 1.0] → should reject
     assert len(lib.query_by_weights([0.0, 1.0])) == 0
@@ -393,9 +411,9 @@ def test_save_load_roundtrip(tmp_path):
     lib2.load(save_file)
 
     assert lib2.count() == 3
-    assert lib2.get_skill("skill-1") is not None
-    assert lib2.get_skill("skill-2") is not None
-    assert lib2.get_skill("skill-3") is not None
+    assert lib2.get_skill("cert-cds-001") is not None
+    assert lib2.get_skill("cert-pds-001") is not None
+    assert lib2.get_skill("cert-cds-002") is not None
 
 
 def test_loaded_skills_have_no_policy(tmp_path):
@@ -417,8 +435,8 @@ def test_loaded_skills_preserve_data(tmp_path):
     save_file = str(tmp_path / "test_library.json")
 
     lib = SkillLibrary()
-    cert = make_pds_certificate()
-    lib.add_skill("s1", cert, make_dummy_policy())
+    cert = make_pds_certificate("s1")
+    lib.add_skill(cert.skill_id, cert, make_dummy_policy())
     lib.save(save_file)
 
     lib2 = SkillLibrary()
@@ -445,15 +463,15 @@ def test_register_policy_after_load(tmp_path):
     lib2.load(save_file)
 
     # Before registration
-    assert lib2.get_skill("skill-1").policy is None
+    assert lib2.get_skill("cert-cds-001").policy is None
 
     # Register a policy
     new_policy = make_dummy_policy(99)
-    assert lib2.register_policy("skill-1", new_policy) is True
+    assert lib2.register_policy("cert-cds-001", new_policy) is True
 
     # After registration
-    assert lib2.get_skill("skill-1").policy is not None
-    assert lib2.get_skill("skill-1").policy(None) == 99
+    assert lib2.get_skill("cert-cds-001").policy is not None
+    assert lib2.get_skill("cert-cds-001").policy(None) == 99
 
 
 def test_register_policy_nonexistent_skill():
@@ -526,68 +544,56 @@ def test_select_by_payoff_requires_generator():
         selector.select_by_payoff(obs)
 
 
-def test_select_by_payoff_picks_highest_delta_r():
-    """select_by_payoff should pick the skill with the highest certified delta_r."""
+def test_select_by_payoff_picks_valid_skill():
+    """select_by_payoff should pick a valid library skill."""
     import torch
     from generator.skill_generator import SkillGenerator
 
     lib = build_populated_library()
     gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
-
-    # Force positive prediction so the greedy path is taken
     with torch.no_grad():
         gen.payoff_head.bias.fill_(5.0)
 
     selector = SkillSelector(library=lib, generator=gen)
-    obs = np.zeros(8)
-    chosen = selector.select_by_payoff(obs)
-
-    # All three skills have delta_r=0.5 — any one can be picked as "max".
-    # Just verify the result is a valid library skill.
-    assert chosen in {"skill-1", "skill-2", "skill-3"}
+    chosen = selector.select_by_payoff(np.zeros(8))
+    skill_ids = {e.skill_id for e in lib.get_admitted_skills()}
+    assert chosen in skill_ids
 
 
 def test_select_by_payoff_falls_back_on_negative_prediction():
-    """If the Generator predicts negative payoff, select_by_payoff falls back to random."""
+    """If Generator predicts negative payoff, fall back to random."""
     import torch
     from generator.skill_generator import SkillGenerator
 
     lib = build_populated_library()
     gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
-
-    # Force negative prediction
     with torch.no_grad():
         gen.payoff_head.bias.fill_(-10.0)
 
     selector = SkillSelector(library=lib, generator=gen, seed=42)
-    obs = np.zeros(8)
-    chosen = selector.select_by_payoff(obs)
-
-    # Falls back to random — result must be a valid skill from the library
-    assert chosen in {"skill-1", "skill-2", "skill-3"}
+    chosen = selector.select_by_payoff(np.zeros(8))
+    skill_ids = {e.skill_id for e in lib.get_admitted_skills()}
+    assert chosen in skill_ids
 
 
 def test_select_by_payoff_empty_library_returns_none():
-    """select_by_payoff on an empty library returns None."""
+    """select_by_payoff on empty library returns None."""
     from generator.skill_generator import SkillGenerator
 
     lib = SkillLibrary()
     gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
     selector = SkillSelector(library=lib, generator=gen)
-    obs = np.zeros(8)
-    assert selector.select_by_payoff(obs) is None
+    assert selector.select_by_payoff(np.zeros(8)) is None
 
 
 def test_select_by_mdn_requires_both_models():
     """select_by_mdn should raise ValueError without both generator and mdn."""
     lib = build_populated_library()
-
-    # No models at all
     selector = SkillSelector(library=lib)
+
     with pytest.raises(ValueError, match="SkillGenerator"):
         selector.select_by_mdn(np.zeros(8))
 
-    # Only generator
     from generator.skill_generator import SkillGenerator
     gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
     selector = SkillSelector(library=lib, generator=gen)
@@ -597,23 +603,54 @@ def test_select_by_mdn_requires_both_models():
 
 def test_select_by_mdn_returns_valid_skill():
     """select_by_mdn should return a skill from the library."""
-    import torch
     from generator.skill_generator import SkillGenerator
     from generator.mdn import MotiveDecompositionNetwork
 
     lib = build_populated_library()
     gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
     mdn = MotiveDecompositionNetwork(input_dim=14, num_objectives=2)
-
     selector = SkillSelector(library=lib, generator=gen, mdn=mdn, seed=42)
-    obs = np.zeros(8)
-    chosen = selector.select_by_mdn(obs)
+    chosen = selector.select_by_mdn(np.zeros(8))
+    skill_ids = {e.skill_id for e in lib.get_admitted_skills()}
+    assert chosen in skill_ids
 
-    assert chosen in {"skill-1", "skill-2", "skill-3"}
+
+def test_select_by_mdn_ordering_independent():
+    """select_by_mdn result must not depend on library iteration order."""
+    import torch
+    from generator.skill_generator import SkillGenerator
+    from generator.mdn import MotiveDecompositionNetwork
+
+    # Fix model weights for determinism
+    torch.manual_seed(0)
+    gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
+    mdn = MotiveDecompositionNetwork(input_dim=14, num_objectives=2)
+    obs = np.zeros(8)
+
+    # Build two libraries with the same skills in different insertion orders
+    lib_a = build_populated_library()   # skill-1, skill-2, skill-3
+    sel_a = SkillSelector(library=lib_a, generator=gen, mdn=mdn, seed=42)
+    result_a = sel_a.select_by_mdn(obs)
+
+    # Build library with reversed insertion order
+    lib_b = SkillLibrary()
+    skills = lib_a.get_admitted_skills()
+    for entry in reversed(skills):
+        lib_b.add_skill(
+            entry.skill_id,
+            entry.certificate,
+            entry.policy or (lambda obs: 0),
+        )
+    sel_b = SkillSelector(library=lib_b, generator=gen, mdn=mdn, seed=42)
+    result_b = sel_b.select_by_mdn(obs)
+
+    assert result_a == result_b, (
+        f"MDN selection depends on library order: {result_a} vs {result_b}"
+    )
 
 
 def test_select_by_mdn_empty_library_returns_none():
-    """select_by_mdn on an empty library returns None."""
+    """select_by_mdn on empty library returns None."""
     from generator.skill_generator import SkillGenerator
     from generator.mdn import MotiveDecompositionNetwork
 
@@ -622,26 +659,6 @@ def test_select_by_mdn_empty_library_returns_none():
     mdn = MotiveDecompositionNetwork(input_dim=14, num_objectives=2)
     selector = SkillSelector(library=lib, generator=gen, mdn=mdn)
     assert selector.select_by_mdn(np.zeros(8)) is None
-
-
-def test_select_by_mdn_deterministic_with_same_seed():
-    """select_by_mdn should produce consistent results given the same model state."""
-    import torch
-    from generator.skill_generator import SkillGenerator
-    from generator.mdn import MotiveDecompositionNetwork
-
-    lib = build_populated_library()
-    torch.manual_seed(0)
-    gen = SkillGenerator(input_dim=8, hidden_dim=16, motive_dim=2)
-    mdn = MotiveDecompositionNetwork(input_dim=14, num_objectives=2)
-
-    obs = np.zeros(8)
-    s1 = SkillSelector(library=lib, generator=gen, mdn=mdn, seed=42)
-    s2 = SkillSelector(library=lib, generator=gen, mdn=mdn, seed=42)
-
-    r1 = s1.select_by_mdn(obs)
-    r2 = s2.select_by_mdn(obs)
-    assert r1 == r2
 
 # Integration: Certification → Library → Selection
 def test_certification_to_library_flow():
@@ -697,8 +714,8 @@ def test_certification_to_library_flow():
 
     # Build library
     lib = SkillLibrary()
-    lib.add_skill("hover", cert_a, lambda obs: 0)
-    lib.add_skill("land-fast", cert_b, lambda obs: 2)
+    lib.add_skill(cert_a.skill_id, cert_a, lambda obs: 0)
+    lib.add_skill(cert_b.skill_id, cert_b, lambda obs: 2)
     assert lib.count() == 2
 
     # Query: both should appear for equal weights
@@ -708,9 +725,9 @@ def test_certification_to_library_flow():
     # Query: only CDS for gate type
     cds_only = lib.query_by_gate_type("CDS")
     assert len(cds_only) == 1
-    assert cds_only[0].skill_id == "hover"
+    assert cds_only[0].skill_id == "cert-int-a"
 
     # Select: should return one of the two skill IDs
     selector = SkillSelector(library=lib, seed=42)
     chosen = selector.select_random(np.zeros(8))
-    assert chosen in {"hover", "land-fast"}
+    assert chosen in {"cert-int-a", "cert-int-b"}
