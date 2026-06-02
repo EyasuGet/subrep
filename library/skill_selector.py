@@ -13,8 +13,7 @@ from typing import Optional
 import numpy as np
 import torch
 from .skill_library import SkillLibrary
-from utils.mdn_contracts import CandidateSkillRecord
-from utils.mdn_selection import alpha_to_mean_weights, select_best_candidate
+from utils.mdn_selection import alpha_to_mean_weights
 from utils.mdn_context import build_mdn_context_from_entry
 
 
@@ -67,20 +66,18 @@ class SkillSelector:
 
     def select_by_payoff(self, obs: np.ndarray) -> Optional[str]:
         """
-        Select the skill with the highest Generator-predicted payoff.
+        Select the skill with the highest motive-aligned score.
 
-        Uses the SkillGenerator to predict expected payoff for the current
-        observation, then picks the library skill whose certified delta_r
-        is highest. The Generator prediction provides a confidence signal
-        that the environment state is favorable for skill execution.
+        Uses the SkillGenerator to predict expected (payoff, motives) for the
+        current observation. If the predicted payoff is negative (unpromising
+        state), falls back to random selection for exploration. Otherwise,
+        scores each library skill as:
 
-        The scoring formula per skill is simply:
+            score = delta_r + pred_motives^T · delta_n
 
-            score = delta_r
-
-        i.e. greedy on the certified payoff improvement. The Generator is
-        used as a gate: if its predicted payoff is negative (the current
-        state looks unpromising), we fall back to random selection.
+        where pred_motives is the Generator's predicted motive vector. This
+        picks the skill whose certified improvements best align with the
+        Generator's expectation of which motives matter in this state.
 
         Args:
             obs: Current environment observation (8D for LunarLander).
@@ -101,42 +98,46 @@ class SkillSelector:
         if not skills:
             return None
 
-        # Use Generator to predict expected outcomes
+        # Use Generator to predict expected outcomes for this observation.
         obs_tensor = torch.tensor(
             np.asarray(obs, dtype=np.float32), dtype=torch.float32
         )
         with torch.no_grad():
-            pred_payoff, _ = self.generator(obs_tensor)
+            pred_payoff, pred_motives = self.generator(obs_tensor)
 
         # If the Generator predicts this state is unpromising (negative payoff),
         # fall back to random selection to maintain exploration.
         if float(pred_payoff.item()) < 0.0:
             return self.select_random(obs)
 
-        # Greedy: pick the skill with the highest certified delta_r.
-        best_entry = max(skills, key=lambda e: e.delta_r)
+        # Use Generator's predicted motives as alignment weights to pick the
+        # skill whose certified delta_n best matches what the state needs.
+        pred_m = pred_motives.cpu().numpy().reshape(-1)
+        best_entry = max(
+            skills,
+            key=lambda e: e.delta_r + float(
+                np.dot(pred_m, np.asarray(e.delta_n, dtype=np.float32))
+            ),
+        )
         return best_entry.skill_id
 
     def select_by_mdn(self, obs: np.ndarray) -> Optional[str]:
         """
         Select the skill with the highest MDN-weighted score.
 
-        Uses the MotiveDecompositionNetwork to predict context-aware
-        objective weights w from a 14D context vector, then scores each
-        library skill as:
+        Queries the MotiveDecompositionNetwork **once per candidate skill**
+        with a 14D context vector:
 
-            score = delta_r + w^T * delta_n
+            context = [obs(8D), delta_r(1D), delta_n(2D), gate(2D), margin(1D)]
 
-        This selects the skill that maximizes the weighted combination
-        of payoff improvement and motive improvements, where the weights
-        are adapted to the current environment state.
+        Each candidate gets its own context → its own Dirichlet α → its own
+        simplex weights w. The score for each candidate is:
 
-        The context vector for each candidate is built as:
-            [obs(8D), delta_r(1D), delta_n(2D), gate_indicator(2D), margin(1D)]
+            score = delta_r + w^T · delta_n
 
-        For the initial MDN query, we use the library's best skill's
-        context to get weights, then re-score all candidates under those
-        weights.
+        This means a PDS skill with a tight margin will receive more
+        conservative weights than a comfortable CDS skill, even in the
+        same environment state.
 
         Args:
             obs: Current environment observation (8D for LunarLander).
@@ -160,31 +161,28 @@ class SkillSelector:
 
         obs_np = np.asarray(obs, dtype=np.float32).reshape(-1)
 
-        # Build context from the first skill to get initial MDN weights.
-        # The MDN predicts general trade-off preferences for this observation;
-        # individual skill metrics provide tie-breaking through scoring.
-        context = build_mdn_context_from_entry(obs_np, skills[0])
-        context_tensor = torch.tensor(context, dtype=torch.float32)
+        best_id: Optional[str] = None
+        best_score = -float("inf")
 
-        with torch.no_grad():
-            alpha, _ = self.mdn.forward_inference(context_tensor)
+        for entry in skills:
+            # Each skill gets its OWN 14D context → its OWN weight prediction.
+            context = build_mdn_context_from_entry(obs_np, entry)
+            context_tensor = torch.tensor(context, dtype=torch.float32)
 
-        weights = alpha_to_mean_weights(alpha.cpu().numpy())
+            with torch.no_grad():
+                alpha, _ = self.mdn.forward_inference(context_tensor)
 
-        # Build CandidateSkillRecords from all library entries.
-        candidates = tuple(
-            CandidateSkillRecord(
-                skill_id=entry.skill_id,
-                delta_r=entry.delta_r,
-                delta_n=entry.delta_n,
-                is_certified=True,
-                gate_type=entry.gate_type,
-                admission_margin=entry.admission_margin,
-                epsilon=entry.epsilon,
-            )
-            for entry in skills
-        )
+            weights = alpha_to_mean_weights(alpha.cpu().numpy())
+            delta_n = np.asarray(entry.delta_n, dtype=np.float32)
+            score = float(entry.delta_r + np.dot(weights, delta_n))
 
-        # Score each candidate as delta_r + w^T * delta_n, pick the best.
-        best_id, _ = select_best_candidate(candidates, weights)
+            # Tie-break by skill_id for deterministic ordering when scores
+            # are equal (e.g. skills with identical certificates).
+            if score > best_score or (
+                score == best_score
+                and (best_id is None or entry.skill_id < best_id)
+            ):
+                best_id = entry.skill_id
+                best_score = score
+
         return best_id
